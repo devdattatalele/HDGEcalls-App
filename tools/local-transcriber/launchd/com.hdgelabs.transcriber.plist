@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  HDGEcalls local Whisper transcriber — runs on login, restarts on crash.
+
+  Install:
+    cp launchd/com.hdgelabs.transcriber.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.hdgelabs.transcriber.plist
+
+  Edit WorkingDirectory + the npm path if your layout differs. The defaults
+  assume the repo is at /Users/dev16/Documents/calling/HDGEcalls\ app/.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hdgelabs.transcriber</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/dev16/Documents/calling/HDGEcalls app/tools/local-transcriber</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/npm</string>
+    <string>start</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/hdgecalls-transcriber.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/hdgecalls-transcriber.err.log</string>
+</dict>
+</plist>

@@ -1,18 +1,38 @@
 import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
-import { transcribeFile } from './whisper.ts';
+import { transcribeFile as transcribeWhisper } from './whisper.ts';
+import { transcribeFileSarvam, sarvamProviderLabel } from './sarvam.ts';
+import { transcribeFileIndic, indicProviderLabel } from './indic.ts';
 import { downloadToTmp, convertToWav16k, cleanupDir } from './audio.ts';
+import { startHealthServer, stats } from './server.ts';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
 
+const WORKER_ID = process.env.WORKER_ID ?? os.hostname() ?? 'unknown-worker';
+const BACKEND = (process.env.TRANSCRIPTION_BACKEND ?? 'indic').toLowerCase();
+const transcribeFn =
+  BACKEND === 'sarvam'
+    ? transcribeFileSarvam
+    : BACKEND === 'indic'
+      ? transcribeFileIndic
+      : transcribeWhisper;
+
 const SUPABASE_URL = required('SUPABASE_URL');
 const SERVICE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
 const POLL_SEC = Number(process.env.POLL_INTERVAL_SEC ?? '10');
+const POLL_ACTIVE_SEC = Number(process.env.POLL_INTERVAL_ACTIVE_SEC ?? '3');
 const BATCH_SIZE = Number(process.env.BATCH_SIZE ?? '2');
-const PROVIDER_LABEL = `whisper.cpp:${path
-  .basename(process.env.WHISPER_MODEL ?? 'ggml-small.bin')
-  .replace(/\.bin$/, '')}`;
+const STUCK_SEC = Number(process.env.STUCK_PROCESSING_SEC ?? '600');
+const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? '7777');
+const PROVIDER_LABEL =
+  BACKEND === 'sarvam'
+    ? sarvamProviderLabel()
+    : BACKEND === 'indic'
+      ? indicProviderLabel()
+      : `whisper.cpp:${path
+          .basename(process.env.WHISPER_MODEL ?? 'ggml-small.bin')
+          .replace(/\.bin$/, '')}`;
 
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -22,17 +42,97 @@ const runOnce = process.argv.includes('--once');
 
 async function main() {
   console.log(`[transcriber] starting — provider=${PROVIDER_LABEL}`);
-  console.log(`[transcriber] polling every ${POLL_SEC}s (batch ${BATCH_SIZE})`);
+  console.log(
+    `[transcriber] poll idle=${POLL_SEC}s active=${POLL_ACTIVE_SEC}s batch=${BATCH_SIZE} stuck=${STUCK_SEC}s`,
+  );
+  console.log(`[transcriber] backend=${BACKEND} worker_id=${WORKER_ID}`);
+  if (BACKEND === 'indic') {
+    console.log(
+      `[transcriber] indic model=${process.env.INDIC_CONFORMER_MODEL ?? 'ai4bharat/indic-conformer-600m-multilingual'} lang=${process.env.INDIC_LANGUAGE ?? 'mr'} decoder=${process.env.INDIC_DECODER ?? 'ctc'} romanize=${process.env.ROMANIZE_HINDI ?? '1'}`,
+    );
+  } else if (BACKEND === 'sarvam') {
+    console.log(
+      `[transcriber] sarvam model=${process.env.SARVAM_MODEL ?? 'saarika:v2.5'} lang=${process.env.SARVAM_LANGUAGE ?? 'unknown'} diarize=${process.env.SARVAM_WITH_DIARIZATION ?? '1'}`,
+    );
+  } else {
+    console.log(
+      `[transcriber] whisper language=${process.env.WHISPER_LANGUAGE ?? 'auto'} romanize=${process.env.ROMANIZE_HINDI ?? '1'}`,
+    );
+    console.log(
+      `[transcriber] whisper extra args: ${process.env.WHISPER_EXTRA_ARGS ?? '(none)'}`,
+    );
+  }
+  stats.provider = PROVIDER_LABEL;
+  stats.started_at = new Date().toISOString();
+
+  if (HEALTH_PORT > 0) {
+    startHealthServer(HEALTH_PORT);
+  }
 
   while (true) {
+    let processed = 0;
     try {
-      const processed = await pass();
+      await recoverStuck();
+      processed = await pass();
       if (processed > 0) console.log(`[transcriber] processed ${processed} call(s)`);
+      stats.last_pass_at = new Date().toISOString();
+      stats.last_pass_processed = processed;
     } catch (e) {
       console.error('[transcriber] pass failed:', e);
+      stats.last_error = String((e as Error)?.message ?? e);
     }
+    await publishHeartbeat();
     if (runOnce) return;
-    await sleep(POLL_SEC * 1000);
+    const sleepMs = (processed > 0 ? POLL_ACTIVE_SEC : POLL_SEC) * 1000;
+    await sleep(sleepMs);
+  }
+}
+
+/**
+ * Upsert our liveness + counters into public.transcriber_status. The
+ * dashboard reads this (via the calls.hdgelabs.com FastAPI) to render the
+ * "Transcriber online" pill — no inbound network path to the Mac required.
+ */
+async function publishHeartbeat(): Promise<void> {
+  try {
+    await supabase.from('transcriber_status').upsert(
+      {
+        worker_id: WORKER_ID,
+        provider: stats.provider,
+        started_at: stats.started_at,
+        last_heartbeat: new Date().toISOString(),
+        last_pass_at: stats.last_pass_at,
+        jobs_in_flight: stats.jobs_in_flight,
+        jobs_done_today: stats.jobs_done_today,
+        jobs_failed_today: stats.jobs_failed_today,
+        last_error: stats.last_error,
+      },
+      { onConflict: 'worker_id' },
+    );
+  } catch (e) {
+    console.warn('[transcriber] heartbeat publish failed:', (e as Error)?.message ?? e);
+  }
+}
+
+/**
+ * Reclaim rows that were claimed ('processing') but never finished —
+ * usually because the worker crashed mid-job. Flip them back to 'pending' so
+ * the next pass picks them up.
+ */
+async function recoverStuck(): Promise<void> {
+  const cutoff = new Date(Date.now() - STUCK_SEC * 1000).toISOString();
+  const { data, error } = await supabase
+    .from('calls')
+    .update({ transcription_status: 'pending' })
+    .eq('transcription_status', 'processing')
+    .lt('updated_at', cutoff)
+    .select('id');
+  if (error) {
+    console.warn('[transcriber] stuck-recovery failed:', error.message);
+    return;
+  }
+  if (data && data.length > 0) {
+    console.log(`[transcriber] recovered ${data.length} stuck row(s) -> pending`);
   }
 }
 
@@ -48,8 +148,14 @@ async function pass(): Promise<number> {
   if (!rows || rows.length === 0) return 0;
 
   for (const row of rows) {
-    await processCall(row).catch(async (e) => {
+    stats.jobs_in_flight += 1;
+    try {
+      await processCall(row);
+      stats.jobs_done_today += 1;
+    } catch (e) {
       console.error(`[transcriber] call ${row.id} failed:`, e);
+      stats.last_error = String((e as Error)?.message ?? e);
+      stats.jobs_failed_today += 1;
       await supabase
         .from('calls')
         .update({ transcription_status: 'failed' })
@@ -57,9 +163,11 @@ async function pass(): Promise<number> {
       await supabase.from('transcription_errors').insert({
         call_id: row.id,
         provider: PROVIDER_LABEL,
-        error: String(e?.message ?? e),
+        error: String((e as Error)?.message ?? e),
       });
-    });
+    } finally {
+      stats.jobs_in_flight = Math.max(0, stats.jobs_in_flight - 1);
+    }
   }
   return rows.length;
 }
@@ -70,13 +178,20 @@ async function processCall(row: {
 }) {
   if (!row.recording_storage_path) return;
 
-  // Claim the row so other workers / passes don't grab it.
-  const { error: claimErr } = await supabase
+  // Claim the row so other workers / passes don't grab it. The matching
+  // .eq('transcription_status','pending') guards against races — if another
+  // worker already grabbed it, our update touches 0 rows and we fall through.
+  const { data: claimed, error: claimErr } = await supabase
     .from('calls')
     .update({ transcription_status: 'processing' })
     .eq('id', row.id)
-    .eq('transcription_status', 'pending');
+    .eq('transcription_status', 'pending')
+    .select('id');
   if (claimErr) throw claimErr;
+  if (!claimed || claimed.length === 0) {
+    // Already claimed by someone else; skip silently.
+    return;
+  }
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'calling-'));
   try {
@@ -90,8 +205,10 @@ async function processCall(row: {
       workDir,
       path.basename(row.recording_storage_path),
     );
+    // Sarvam accepts the source audio directly; whisper.cpp wants 16 kHz mono
+    // PCM WAV. Doing the conversion always makes both paths predictable.
     const wav = await convertToWav16k(downloaded, workDir);
-    const result = await transcribeFile(wav);
+    const result = await transcribeFn(wav);
 
     const { error: updErr } = await supabase
       .from('calls')

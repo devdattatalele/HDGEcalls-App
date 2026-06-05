@@ -3,3 +3,5 @@ node_modules/
 models/
 work/
 *.log
+.venv-indic/
+python/__pycache__/
