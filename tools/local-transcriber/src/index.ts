@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 import { transcribeFile as transcribeWhisper } from './whisper.ts';
 import { transcribeFileIndic, indicProviderLabel } from './indic.ts';
+import { transcribeFileSarvam, sarvamProviderLabel } from './sarvam.ts';
 import { downloadToTmp, convertToWav16k, cleanupDir } from './audio.ts';
 import { startHealthServer, stats } from './server.ts';
 import path from 'node:path';
@@ -11,12 +12,15 @@ import fs from 'node:fs/promises';
 const WORKER_ID = process.env.WORKER_ID ?? os.hostname() ?? 'unknown-worker';
 const BACKEND = (process.env.TRANSCRIPTION_BACKEND ?? 'indic').toLowerCase();
 const transcribeFn =
-  BACKEND === 'whisper' ? transcribeWhisper : transcribeFileIndic;
+  BACKEND === 'sarvam'
+    ? transcribeFileSarvam
+    : BACKEND === 'whisper'
+      ? transcribeWhisper
+      : transcribeFileIndic;
 
-// When the primary backend is indic, also run whisper.cpp in parallel to
-// produce a code-switched "mixed" transcript (Layer 3). IndicConformer has
-// no English vocabulary so it drops words like "meeting" / "UI" — whisper
-// preserves them. Set to 0 to skip if the customer's calls are pure Indic.
+// Layer 3 (whisper.cpp code-switch) only adds value alongside the indic
+// stack — sarvam already preserves English code-switches natively, and
+// running whisper would just slow that backend down for no gain.
 const INCLUDE_WHISPER_LAYER =
   BACKEND === 'indic' && (process.env.INCLUDE_WHISPER_LAYER ?? '1') !== '0';
 
@@ -28,11 +32,13 @@ const BATCH_SIZE = Number(process.env.BATCH_SIZE ?? '2');
 const STUCK_SEC = Number(process.env.STUCK_PROCESSING_SEC ?? '600');
 const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? '7777');
 const PROVIDER_LABEL =
-  BACKEND === 'whisper'
-    ? `whisper.cpp:${path
-        .basename(process.env.WHISPER_MODEL ?? 'ggml-small.bin')
-        .replace(/\.bin$/, '')}`
-    : indicProviderLabel();
+  BACKEND === 'sarvam'
+    ? sarvamProviderLabel()
+    : BACKEND === 'whisper'
+      ? `whisper.cpp:${path
+          .basename(process.env.WHISPER_MODEL ?? 'ggml-small.bin')
+          .replace(/\.bin$/, '')}`
+      : indicProviderLabel();
 
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -46,7 +52,11 @@ async function main() {
     `[transcriber] poll idle=${POLL_SEC}s active=${POLL_ACTIVE_SEC}s batch=${BATCH_SIZE} stuck=${STUCK_SEC}s`,
   );
   console.log(`[transcriber] backend=${BACKEND} worker_id=${WORKER_ID}`);
-  if (BACKEND === 'whisper') {
+  if (BACKEND === 'sarvam') {
+    console.log(
+      `[transcriber] sarvam model=${process.env.SARVAM_MODEL ?? 'saarika:v2.5'} lang=${process.env.SARVAM_LANGUAGE ?? 'unknown'} diarize=${process.env.SARVAM_WITH_DIARIZATION ?? '1'}`,
+    );
+  } else if (BACKEND === 'whisper') {
     console.log(
       `[transcriber] whisper language=${process.env.WHISPER_LANGUAGE ?? 'auto'} romanize=${process.env.ROMANIZE_HINDI ?? '1'}`,
     );
