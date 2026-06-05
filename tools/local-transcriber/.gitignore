@@ -5,3 +5,4 @@ work/
 *.log
 .venv-indic/
 python/__pycache__/
+.DS_Store
