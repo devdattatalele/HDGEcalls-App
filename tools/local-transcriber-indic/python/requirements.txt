@@ -1,0 +1,26 @@
+# IndicConformer + IndicTrans2 daemon — install in a Python 3.12 venv.
+#
+#   python3.12 -m venv .venv-indic
+#   source .venv-indic/bin/activate
+#   pip install -r python/requirements.txt
+#
+# Also: accept the AI4Bharat gated repos at
+#   https://huggingface.co/ai4bharat/indic-conformer-600m-multilingual
+# and set HF_TOKEN=hf_... in .env so first launch can fetch the model.
+# (The IndicTrans2 repo is not gated as of writing — accepting one HF EULA
+# is enough.)
+
+torch>=2.4
+# IndicTrans2's custom modeling code uses the pre-Cache `past_key_values`
+# layout. transformers 4.50+ broke that contract — pin to 4.45.x.
+transformers==4.45.2
+accelerate>=1.0
+librosa>=0.10
+numpy>=1.26
+soundfile>=0.12
+onnxruntime>=1.20
+huggingface_hub>=0.27
+sentencepiece>=0.2
+sacremoses>=0.1
+IndicTransToolkit>=1.1.1
+torchaudio>=2.4
