@@ -60,6 +60,11 @@ DEFAULT_DECODER = os.environ.get("INDIC_DECODER", "ctc")
 TRANSLATE = (os.environ.get("INDIC_TRANSLATE_TO_ENGLISH", "1") != "0")
 MT_BEAM = int(os.environ.get("INDIC_TRANS_BEAM", "5"))
 MT_MAX_LEN = int(os.environ.get("INDIC_TRANS_MAX_LEN", "512"))
+# Anything longer than INDIC_ASR_CHUNK_SEC gets split into windows because
+# the IndicConformer ONNX encoder has no built-in chunking — positional
+# embeddings overflow on long inputs ("2113 by 7113" broadcast error).
+ASR_CHUNK_SEC = float(os.environ.get("INDIC_ASR_CHUNK_SEC", "60"))
+ASR_CHUNK_OVERLAP_SEC = float(os.environ.get("INDIC_ASR_CHUNK_OVERLAP_SEC", "1.5"))
 
 
 # IndicTrans2 source-language tags. Keys are the ISO-639-1 codes the
@@ -156,12 +161,14 @@ def main() -> None:
 
         try:
             audio_np, _ = librosa.load(audio_path, sr=16000, mono=True)
-            wav = torch.from_numpy(audio_np).unsqueeze(0)
-            audio_sec = wav.shape[-1] / 16000.0
+            audio_sec = len(audio_np) / 16000.0
 
-            # Layer 1 — ASR
+            # Layer 1 — ASR. Chunk long files so the ONNX encoder's
+            # positional embeddings don't overflow.
             t_asr0 = time.time()
-            transcript = str(asr_model(wav, language, decoder)).strip()
+            transcript = asr_transcribe_chunked(
+                asr_model, audio_np, language, decoder
+            )
             asr_sec = time.time() - t_asr0
 
             # Layer 2 — translate native script to English (best-effort;
@@ -212,6 +219,54 @@ def main() -> None:
                 json.dumps({"ok": False, "error": str(exc)[:500]}) + "\n"
             )
             sys.stdout.flush()
+
+
+def asr_transcribe_chunked(
+    model,
+    audio_np,
+    language: str,
+    decoder: str,
+):
+    """Run IndicConformer over audio that may be longer than the encoder
+    can handle in one pass.
+
+    The official ONNX export has no internal chunker — long inputs blow up
+    with a positional-embedding broadcast mismatch ("2113 by 7113"). We
+    split into fixed windows (default 60 s) with a small overlap (1.5 s)
+    to avoid mid-word splits, then concatenate the per-chunk transcripts.
+    """
+    sr = 16000
+    total_samples = len(audio_np)
+    chunk_samples = int(ASR_CHUNK_SEC * sr)
+    overlap_samples = int(ASR_CHUNK_OVERLAP_SEC * sr)
+
+    if total_samples <= chunk_samples:
+        wav = torch.from_numpy(audio_np).unsqueeze(0)
+        return str(model(wav, language, decoder)).strip()
+
+    parts: list[str] = []
+    start = 0
+    while start < total_samples:
+        end = min(start + chunk_samples, total_samples)
+        chunk = audio_np[start:end]
+        # Skip a final sliver that's too short — it'll already be covered
+        # by the previous chunk's overlap.
+        if end > start + sr // 2:  # at least 0.5 s
+            wav = torch.from_numpy(chunk).unsqueeze(0)
+            try:
+                piece = str(model(wav, language, decoder)).strip()
+            except Exception as exc:  # noqa: BLE001
+                log(
+                    f"chunk [{start / sr:.1f}-{end / sr:.1f}s] failed: {exc}"
+                )
+                piece = ""
+            if piece:
+                parts.append(piece)
+        if end >= total_samples:
+            break
+        start = end - overlap_samples
+
+    return " ".join(p for p in parts if p).strip()
 
 
 def translate(
