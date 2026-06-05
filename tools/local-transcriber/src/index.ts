@@ -13,6 +13,13 @@ const BACKEND = (process.env.TRANSCRIPTION_BACKEND ?? 'indic').toLowerCase();
 const transcribeFn =
   BACKEND === 'whisper' ? transcribeWhisper : transcribeFileIndic;
 
+// When the primary backend is indic, also run whisper.cpp in parallel to
+// produce a code-switched "mixed" transcript (Layer 3). IndicConformer has
+// no English vocabulary so it drops words like "meeting" / "UI" — whisper
+// preserves them. Set to 0 to skip if the customer's calls are pure Indic.
+const INCLUDE_WHISPER_LAYER =
+  BACKEND === 'indic' && (process.env.INCLUDE_WHISPER_LAYER ?? '1') !== '0';
+
 const SUPABASE_URL = required('SUPABASE_URL');
 const SERVICE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
 const POLL_SEC = Number(process.env.POLL_INTERVAL_SEC ?? '10');
@@ -194,19 +201,33 @@ async function processCall(row: {
       workDir,
       path.basename(row.recording_storage_path),
     );
-    // Sarvam accepts the source audio directly; whisper.cpp wants 16 kHz mono
-    // PCM WAV. Doing the conversion always makes both paths predictable.
+    // 16 kHz mono PCM WAV — both backends consume the same canonical form.
     const wav = await convertToWav16k(downloaded, workDir);
-    const result = await transcribeFn(wav);
 
-    // Indic backend supplies the IndicTrans2 English layer; whisper.cpp /
-    // sarvam leave it undefined. Persist whatever we got.
+    // Run primary backend + (optionally) whisper.cpp in parallel. Whisper
+    // runs in a separate process so the two transcribers don't fight over
+    // the same model — total wall ≈ max(indic, whisper).
+    const [primaryResult, mixedResult] = await Promise.all([
+      transcribeFn(wav),
+      INCLUDE_WHISPER_LAYER
+        ? transcribeWhisper(wav).catch((e) => {
+            console.warn(
+              `[transcriber] whisper layer failed: ${(e as Error)?.message ?? e}`,
+            );
+            return null;
+          })
+        : Promise.resolve(null),
+    ]);
+
+    // Indic backend supplies the IndicTrans2 English layer; whisper.cpp
+    // leaves it undefined. Layer 3 (mixed/code-switch) is whisper output.
     const { error: updErr } = await supabase
       .from('calls')
       .update({
-        transcript: result.text,
-        transcript_segments: result.segments,
-        transcript_english: result.textEnglish ?? null,
+        transcript: primaryResult.text,
+        transcript_segments: primaryResult.segments,
+        transcript_english: primaryResult.textEnglish ?? null,
+        transcript_mixed: mixedResult?.text ?? null,
         transcript_provider: PROVIDER_LABEL,
         transcription_status: 'done',
       })
@@ -214,7 +235,7 @@ async function processCall(row: {
     if (updErr) throw updErr;
 
     console.log(
-      `[transcriber] done ${row.id} (${result.text.length} chars, ${result.segments.length} segs)`,
+      `[transcriber] done ${row.id} primary=${primaryResult.text.length}ch en=${(primaryResult.textEnglish ?? '').length}ch mixed=${(mixedResult?.text ?? '').length}ch`,
     );
   } finally {
     await cleanupDir(workDir);
