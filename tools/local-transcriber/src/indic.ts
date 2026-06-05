@@ -37,10 +37,15 @@ export function indicProviderLabel(): string {
 interface DaemonResponse {
   ok: boolean;
   transcript?: string;
+  transcript_english?: string;
+  translate_error?: string | null;
   language?: string;
   decoder?: string;
-  model?: string;
+  asr_model?: string;
+  translate_model?: string | null;
   audio_sec?: number;
+  asr_sec?: number;
+  translate_sec?: number;
   run_sec?: number;
   rtf?: number;
   error?: string;
@@ -61,14 +66,12 @@ function ensureDaemon(): Promise<void> {
     daemonReadyResolve = resolve;
   });
 
-  const env = { ...process.env };
-  // The model lives in HF cache and the offline flag prevents the daemon
-  // from blocking on HF Hub round-trips at startup. The user runs the
-  // first download once (see python/requirements.txt notes).
-  env.HF_HUB_OFFLINE = env.HF_HUB_OFFLINE ?? '1';
-
+  // The daemon inherits HF_HUB_OFFLINE / HF_TOKEN / etc. from the parent
+  // process. First run typically needs online access to fetch IndicTrans2
+  // (~800 MB). After that, set HF_HUB_OFFLINE=1 in .env to skip the per-
+  // start cache-verification round-trip.
   daemon = spawn(PYTHON_BIN, [DAEMON_SCRIPT], {
-    env,
+    env: process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -151,15 +154,25 @@ export async function transcribeFileIndic(
   if (!resp.ok) {
     throw new Error(resp.error ?? 'indic daemon error');
   }
-  const raw = (resp.transcript ?? '').trim();
-  const text = clean(romanize(raw));
 
-  // IndicConformer CTC doesn't emit word/segment timestamps, so we surface
-  // a single segment that spans the whole audio. The dashboard's
-  // TranscriptView renders this as a paragraph with the duration shown.
+  // Layer 1: native-script ASR → Roman.
+  const rawNative = (resp.transcript ?? '').trim();
+  const text = clean(romanize(rawNative));
+
+  // Layer 2: IndicTrans2 English translation (already proper English,
+  // just trim + light whitespace cleanup, no romanisation).
+  const rawEnglish = (resp.transcript_english ?? '').trim();
+  const textEnglish = rawEnglish
+    ? rawEnglish.replace(/\s+/g, ' ').trim()
+    : null;
+
+  if (resp.translate_error) {
+    console.warn(`[indic] translation skipped: ${resp.translate_error}`);
+  }
+
   const segments: Segment[] = text
     ? [{ start: 0, end: resp.audio_sec ?? 0, text }]
     : [];
 
-  return { text, segments };
+  return { text, textEnglish, segments };
 }

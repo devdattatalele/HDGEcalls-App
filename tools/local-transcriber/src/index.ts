@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 import { transcribeFile as transcribeWhisper } from './whisper.ts';
-import { transcribeFileSarvam, sarvamProviderLabel } from './sarvam.ts';
 import { transcribeFileIndic, indicProviderLabel } from './indic.ts';
 import { downloadToTmp, convertToWav16k, cleanupDir } from './audio.ts';
 import { startHealthServer, stats } from './server.ts';
@@ -12,11 +11,7 @@ import fs from 'node:fs/promises';
 const WORKER_ID = process.env.WORKER_ID ?? os.hostname() ?? 'unknown-worker';
 const BACKEND = (process.env.TRANSCRIPTION_BACKEND ?? 'indic').toLowerCase();
 const transcribeFn =
-  BACKEND === 'sarvam'
-    ? transcribeFileSarvam
-    : BACKEND === 'indic'
-      ? transcribeFileIndic
-      : transcribeWhisper;
+  BACKEND === 'whisper' ? transcribeWhisper : transcribeFileIndic;
 
 const SUPABASE_URL = required('SUPABASE_URL');
 const SERVICE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
@@ -26,13 +21,11 @@ const BATCH_SIZE = Number(process.env.BATCH_SIZE ?? '2');
 const STUCK_SEC = Number(process.env.STUCK_PROCESSING_SEC ?? '600');
 const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? '7777');
 const PROVIDER_LABEL =
-  BACKEND === 'sarvam'
-    ? sarvamProviderLabel()
-    : BACKEND === 'indic'
-      ? indicProviderLabel()
-      : `whisper.cpp:${path
-          .basename(process.env.WHISPER_MODEL ?? 'ggml-small.bin')
-          .replace(/\.bin$/, '')}`;
+  BACKEND === 'whisper'
+    ? `whisper.cpp:${path
+        .basename(process.env.WHISPER_MODEL ?? 'ggml-small.bin')
+        .replace(/\.bin$/, '')}`
+    : indicProviderLabel();
 
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -46,20 +39,16 @@ async function main() {
     `[transcriber] poll idle=${POLL_SEC}s active=${POLL_ACTIVE_SEC}s batch=${BATCH_SIZE} stuck=${STUCK_SEC}s`,
   );
   console.log(`[transcriber] backend=${BACKEND} worker_id=${WORKER_ID}`);
-  if (BACKEND === 'indic') {
-    console.log(
-      `[transcriber] indic model=${process.env.INDIC_CONFORMER_MODEL ?? 'ai4bharat/indic-conformer-600m-multilingual'} lang=${process.env.INDIC_LANGUAGE ?? 'mr'} decoder=${process.env.INDIC_DECODER ?? 'ctc'} romanize=${process.env.ROMANIZE_HINDI ?? '1'}`,
-    );
-  } else if (BACKEND === 'sarvam') {
-    console.log(
-      `[transcriber] sarvam model=${process.env.SARVAM_MODEL ?? 'saarika:v2.5'} lang=${process.env.SARVAM_LANGUAGE ?? 'unknown'} diarize=${process.env.SARVAM_WITH_DIARIZATION ?? '1'}`,
-    );
-  } else {
+  if (BACKEND === 'whisper') {
     console.log(
       `[transcriber] whisper language=${process.env.WHISPER_LANGUAGE ?? 'auto'} romanize=${process.env.ROMANIZE_HINDI ?? '1'}`,
     );
     console.log(
       `[transcriber] whisper extra args: ${process.env.WHISPER_EXTRA_ARGS ?? '(none)'}`,
+    );
+  } else {
+    console.log(
+      `[transcriber] indic asr=${process.env.INDIC_CONFORMER_MODEL ?? 'ai4bharat/indic-conformer-600m-multilingual'} translate=${process.env.INDIC_TRANSLATE_TO_ENGLISH ?? '1'} lang=${process.env.INDIC_LANGUAGE ?? 'mr'} decoder=${process.env.INDIC_DECODER ?? 'ctc'} romanize=${process.env.ROMANIZE_HINDI ?? '1'}`,
     );
   }
   stats.provider = PROVIDER_LABEL;
@@ -210,11 +199,14 @@ async function processCall(row: {
     const wav = await convertToWav16k(downloaded, workDir);
     const result = await transcribeFn(wav);
 
+    // Indic backend supplies the IndicTrans2 English layer; whisper.cpp /
+    // sarvam leave it undefined. Persist whatever we got.
     const { error: updErr } = await supabase
       .from('calls')
       .update({
         transcript: result.text,
         transcript_segments: result.segments,
+        transcript_english: result.textEnglish ?? null,
         transcript_provider: PROVIDER_LABEL,
         transcription_status: 'done',
       })
