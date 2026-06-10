@@ -1,97 +1,71 @@
+import { Audio } from 'expo-av';
+import * as Crypto from 'expo-crypto';
 import { File } from 'expo-file-system';
-import { Platform } from 'react-native';
+import type { ShareIntentFile } from 'expo-share-intent';
 import { supabase } from '../supabase/client';
 import { readCallLog } from '../sync/callLog';
 import { ensureDeviceRow } from '../sync/device';
 import { mimeForFilename } from '../sync/folderScan';
 import { uploadRecording } from '../sync/uploader';
 
-// Lazy native-module require: react-native-receive-sharing-intent has a native
-// side and won't load in Expo Go / web. We no-op the listener in that case.
-type ReceiveSharingIntentModule = {
-  getReceivedFiles: (
-    onSuccess: (files: SharedFile[]) => void,
-    onError: (err: unknown) => void,
-    protocol?: string,
-  ) => void;
-  clearReceivedFiles: () => void;
-};
-let ReceiveSharingIntent: ReceiveSharingIntentModule | null = null;
-if (Platform.OS === 'android') {
+// OEM call recorders typically embed the phone number in the filename, e.g.
+// "Call recording 9876543210_20260605_1234.m4a" or "+919876543210_..."
+function extractPhoneFromFilename(name: string): string | null {
+  const digits = name.replace(/[^\d+]/g, '');
+  const m = digits.match(/\+?\d{10,13}/);
+  return m ? m[0] : null;
+}
+
+async function probeAudioDurationSec(uri: string): Promise<number> {
+  let sound: Audio.Sound | null = null;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const mod = require('react-native-receive-sharing-intent');
-    const candidate = (mod?.default ?? mod) as
-      | ReceiveSharingIntentModule
-      | undefined;
-    if (candidate && typeof candidate.getReceivedFiles === 'function') {
-      ReceiveSharingIntent = candidate;
+    const res = await Audio.Sound.createAsync({ uri }, { shouldPlay: false });
+    sound = res.sound;
+    const status = res.status;
+    if (status.isLoaded && status.durationMillis) {
+      return Math.round(status.durationMillis / 1000);
     }
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.warn('[share] native module unavailable — running in Expo Go?', e);
+    return 0;
+  } catch {
+    return 0;
+  } finally {
+    if (sound) await sound.unloadAsync().catch(() => undefined);
   }
 }
 
-type SharedFile = {
-  filePath?: string;
-  contentUri?: string;
-  fileName?: string;
-  mimeType?: string;
-  extension?: string;
-};
+export interface ShareResult {
+  ok: boolean;
+  reason?: string;
+  callId?: string;
+}
 
 /**
- * Register a global listener for files shared into the app from the Google
- * Dialer (or any other audio share source). Returns an unsubscribe fn.
+ * Process one file shared into the app from the system share sheet. Only
+ * audio shares are accepted — everything else is dropped silently so the app
+ * can stay in the share sheet for ALL mime types without polluting the calls
+ * table.
  */
-export function registerShareIntentListener(): () => void {
-  if (!ReceiveSharingIntent) return () => undefined;
-  try {
-    ReceiveSharingIntent.getReceivedFiles(
-      async (files: SharedFile[]) => {
-        for (const f of files) {
-          await handleSharedFile(f).catch((e) =>
-            // eslint-disable-next-line no-console
-            console.warn('[share] failed', e),
-          );
-        }
-        ReceiveSharingIntent?.clearReceivedFiles();
-      },
-      (err) => {
-        // eslint-disable-next-line no-console
-        console.warn('[share] listener error', err);
-      },
-      'com.calling.app.share',
-    );
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.warn('[share] registration failed:', e);
-    return () => undefined;
-  }
-  return () => {
-    try {
-      ReceiveSharingIntent?.clearReceivedFiles();
-    } catch {
-      // ignore
-    }
-  };
-}
+export async function handleSharedFile(
+  f: ShareIntentFile,
+): Promise<ShareResult> {
+  const path = f.path ?? '';
+  const filename =
+    f.fileName?.trim() || path.split('/').pop() || 'shared.m4a';
+  const mime = f.mimeType?.trim() || mimeForFilename(filename);
 
-async function handleSharedFile(f: SharedFile) {
-  const localUri = f.filePath
-    ? f.filePath.startsWith('file://')
-      ? f.filePath
-      : 'file://' + f.filePath
-    : f.contentUri;
-  if (!localUri) return;
-  const filename = f.fileName ?? localUri.split('/').pop() ?? 'shared.m4a';
-  const mime = f.mimeType ?? mimeForFilename(filename);
-  if (!mime.startsWith('audio')) return;
+  if (!mime.startsWith('audio')) {
+    return { ok: false, reason: `ignored non-audio share (${mime})` };
+  }
+  const localUri = path
+    ? path.startsWith('file://') || path.startsWith('content://')
+      ? path
+      : 'file://' + path
+    : null;
+  if (!localUri) return { ok: false, reason: 'no path' };
 
   const { data: sessionData } = await supabase.auth.getSession();
   const userId = sessionData.session?.user?.id;
-  if (!userId) return;
+  if (!userId) return { ok: false, reason: 'not signed in' };
   const deviceId = await ensureDeviceRow({ userId });
 
   // Pair to a CallLog entry by recording mtime closest to a recent call.
@@ -105,52 +79,59 @@ async function handleSharedFile(f: SharedFile) {
     // fall back to now()
   }
 
+  // Soft match: try to lift phone number / contact / direction from a recent
+  // call log entry whose end time is closest to the file's mtime. This is
+  // best-effort — if we can't find a match we still upload (the user
+  // explicitly shared a file; we don't want to silently swallow it).
   const recentCalls = await readCallLog(Date.now() - 24 * 3600 * 1000, 200);
-  let best = null;
+  const MATCH_WINDOW_MS = 10 * 60 * 1000;
+  let best: (typeof recentCalls)[number] | null = null;
   let bestDelta = Infinity;
   for (const c of recentCalls) {
     const target = c.startedAtMs + c.durationSec * 1000;
     const delta = Math.abs(fileMtimeMs - target);
-    if (delta < bestDelta) {
+    if (delta < bestDelta && delta <= MATCH_WINDOW_MS) {
       bestDelta = delta;
       best = c;
     }
   }
-  if (!best) return;
 
-  const { data: row, error: upErr } = await supabase
-    .from('calls')
-    .upsert(
-      {
-        user_id: userId,
-        device_id: deviceId,
-        phone_number: best.phoneNumber,
-        contact_name: best.contactName,
-        direction: best.direction,
-        started_at: new Date(best.startedAtMs).toISOString(),
-        duration_sec: best.durationSec,
-        call_log_id: best.callLogId,
-      },
-      { onConflict: 'device_id,call_log_id' },
-    )
-    .select('id')
-    .single();
-  if (upErr) throw upErr;
+  const callId = Crypto.randomUUID();
+  // Prefer call-log values, but always fall back to data we can derive from
+  // the shared file itself so we never insert a row with 0s duration or a
+  // bogus epoch timestamp.
+  const startedAtMs = best?.startedAtMs ?? fileMtimeMs;
+  const phoneNumber =
+    best?.phoneNumber ?? extractPhoneFromFilename(filename);
+  // Probe the audio for real duration when call log didn't give us one.
+  const probedDurationSec = best?.durationSec ?? (await probeAudioDurationSec(localUri));
 
-  const { path } = await uploadRecording({
+  const { path: uploadedPath, mime: uploadedMime } = await uploadRecording({
     userId,
-    deviceId,
-    callId: row.id,
+    callId,
+    phoneNumber,
+    startedAtMs,
     localUri,
     filename,
   });
 
-  await supabase
-    .from('calls')
-    .update({
-      recording_storage_path: path,
-      recording_mime: mime,
-      recording_source: 'manual_share',
-    })
-    .eq('id', row.id);
+  // Insert with call_log_id = null so the (device_id, call_log_id) unique
+  // constraint never collides with an auto-synced row. Multiple manual
+  // shares can coexist; the user explicitly asked for each one.
+  const { error: insErr } = await supabase.from('calls').insert({
+    id: callId,
+    user_id: userId,
+    device_id: deviceId,
+    phone_number: phoneNumber,
+    contact_name: best?.contactName ?? null,
+    direction: best?.direction ?? null,
+    started_at: new Date(startedAtMs).toISOString(),
+    duration_sec: probedDurationSec,
+    call_log_id: null,
+    recording_storage_path: uploadedPath,
+    recording_mime: uploadedMime ?? mime,
+    recording_source: 'manual_share',
+  });
+  if (insErr) throw insErr;
+  return { ok: true, callId };
 }

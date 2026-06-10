@@ -1,35 +1,87 @@
 import { Directory, File } from 'expo-file-system';
 import { Platform } from 'react-native';
 
-/** Default OEM call-recording folders on Android. */
+/**
+ * Folders known to contain native call recordings across major Android OEMs.
+ * The scanner tolerates missing folders silently — we just look at whichever
+ * actually exist on the device.
+ */
 export const DEFAULT_RECORDING_FOLDERS = [
-  // Stock Android / Pixel / OnePlus / Realme / Oppo
+  // Stock Android / Pixel / Google Recorder
   'file:///storage/emulated/0/Recordings/Call/',
-  // Samsung
+  'file:///storage/emulated/0/Recordings/',
+
+  // Samsung (One UI)
   'file:///storage/emulated/0/Sounds/Voice Recorder/',
   'file:///storage/emulated/0/Recordings/Call/',
-  // Xiaomi / MIUI
+  'file:///storage/emulated/0/Call/',
+
+  // Xiaomi / Redmi / POCO (MIUI / HyperOS) — naming varies across versions
   'file:///storage/emulated/0/MIUI/sound_recorder/call_rec/',
-  // Vivo
+  'file:///storage/emulated/0/MIUI/sound_recorder/',
+  'file:///storage/emulated/0/MIUI/sound recorder/call-rec/',
+  'file:///storage/emulated/0/MIUI/sound recorder/call_rec/',
+  'file:///storage/emulated/0/MIUI/sound recorder/',
+  'file:///storage/emulated/0/MIUI/Sound recorder/Call-rec/',
+  'file:///storage/emulated/0/MIUI/Sound Recorder/Call Rec/',
+  'file:///storage/emulated/0/MIUI/SoundRecorder/call_rec/',
+  'file:///storage/emulated/0/Recordings/Call Recordings/',
+
+  // OnePlus / Oppo / Realme (ColorOS / OxygenOS)
+  'file:///storage/emulated/0/Recordings/Call/',
+  'file:///storage/emulated/0/Music/Recordings/Call Recordings/',
+  'file:///storage/emulated/0/Music/Recordings/',
+  'file:///storage/emulated/0/Recordings/PhoneRecord/',
+  // ColorOS-specific top-level folders (older + newer naming)
+  'file:///storage/emulated/0/CallRecord/',
+  'file:///storage/emulated/0/Call Record/',
+  'file:///storage/emulated/0/Call Recorder/',
+  'file:///storage/emulated/0/.callRecord/',
+  'file:///storage/emulated/0/PhoneRecord/',
+
+  // Vivo / iQOO (FunTouch OS / OriginOS)
   'file:///storage/emulated/0/Record/Call/',
+  'file:///storage/emulated/0/Music/Record/Call/',
+  'file:///storage/emulated/0/记录/通话/',
+
+  // Huawei / Honor (EMUI / MagicOS)
+  'file:///storage/emulated/0/Sounds/CallRecord/',
+  'file:///storage/emulated/0/Music/Recordings/',
+
+  // Motorola
+  'file:///storage/emulated/0/PhoneRecord/',
+  'file:///storage/emulated/0/Recordings/Call/',
+
+  // ASUS / Lenovo / Tecno / Infinix (generic)
+  'file:///storage/emulated/0/CallRecordings/',
+  'file:///storage/emulated/0/PhoneRecord/',
+
+  // Nothing OS (uses Google Recorder layout)
+  'file:///storage/emulated/0/Recordings/Call/',
 ];
 
-const AUDIO_EXTS = ['.m4a', '.mp3', '.amr', '.3gp', '.wav', '.aac', '.opus', '.ogg'];
+const AUDIO_EXTS = ['.m4a', '.mp3', '.amr', '.3gp', '.wav', '.aac', '.opus', '.ogg', '.mp4'];
+const IN_PROGRESS_SUFFIXES = ['.tmp', '.part', '.crdownload', '.partial', '.!ut'];
+const MIN_AUDIO_BYTES = 1024;
 
 export type RecordingFile = {
   uri: string;
   filename: string;
-  mtimeMs: number; // file last-modified, used to pair with a call
+  mtimeMs: number;
   sizeBytes: number;
 };
 
 function isAudioFile(name: string): boolean {
   const lower = name.toLowerCase();
+  if (IN_PROGRESS_SUFFIXES.some((s) => lower.endsWith(s))) return false;
+  if (lower.startsWith('.')) return false;
   return AUDIO_EXTS.some((ext) => lower.endsWith(ext));
 }
 
 /**
- * List audio files inside the given folders. Returns files modified after `sinceMs`.
+ * Walk the given folders one level deep and return audio files modified after
+ * `sinceMs`. Tiny files (likely still being written) are skipped so the next
+ * pass picks them up cleanly.
  */
 export async function scanRecordingFolders(
   folders: string[] = DEFAULT_RECORDING_FOLDERS,
@@ -37,8 +89,12 @@ export async function scanRecordingFolders(
 ): Promise<RecordingFile[]> {
   if (Platform.OS !== 'android') return [];
   const results: RecordingFile[] = [];
+  const seen = new Set<string>();
 
-  for (const folderUri of folders) {
+  // De-dupe paths because several OEMs share the same fallback dir.
+  const uniqueFolders = Array.from(new Set(folders));
+
+  for (const folderUri of uniqueFolders) {
     let dir: Directory;
     try {
       dir = new Directory(folderUri);
@@ -60,11 +116,15 @@ export async function scanRecordingFolders(
       if (!isAudioFile(name)) continue;
       const mtimeMs = entry.modificationTime ?? 0;
       if (mtimeMs <= sinceMs) continue;
+      const sizeBytes = entry.size ?? 0;
+      if (sizeBytes < MIN_AUDIO_BYTES) continue;
+      if (seen.has(entry.uri)) continue;
+      seen.add(entry.uri);
       results.push({
         uri: entry.uri,
         filename: name,
         mtimeMs,
-        sizeBytes: entry.size ?? 0,
+        sizeBytes,
       });
     }
   }
@@ -75,7 +135,8 @@ export async function scanRecordingFolders(
 
 export function mimeForFilename(name: string): string {
   const lower = name.toLowerCase();
-  if (lower.endsWith('.m4a') || lower.endsWith('.aac')) return 'audio/mp4';
+  if (lower.endsWith('.m4a') || lower.endsWith('.aac') || lower.endsWith('.mp4'))
+    return 'audio/mp4';
   if (lower.endsWith('.mp3')) return 'audio/mpeg';
   if (lower.endsWith('.amr')) return 'audio/amr';
   if (lower.endsWith('.3gp')) return 'audio/3gpp';

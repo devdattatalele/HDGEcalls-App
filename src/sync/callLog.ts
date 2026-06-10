@@ -43,7 +43,7 @@ export async function ensureCallLogPermission(): Promise<boolean> {
     {
       title: 'Call log access',
       message:
-        'Calling needs to read your phone call history to sync calls and pair them with recordings.',
+        'HDGEcalls needs to read your phone call history to sync calls and pair them with recordings.',
       buttonPositive: 'Allow',
       buttonNegative: 'Deny',
     },

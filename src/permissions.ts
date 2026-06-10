@@ -21,6 +21,7 @@ export async function requestAllPermissions(): Promise<PermissionState> {
   const wanted: (keyof typeof PermissionsAndroid.PERMISSIONS)[] = [
     'READ_CALL_LOG',
     'READ_CONTACTS',
+    'CALL_PHONE',
   ];
 
   // API 33+ uses READ_MEDIA_AUDIO; older uses READ_EXTERNAL_STORAGE.

@@ -12,6 +12,14 @@ if (!url || !anonKey) {
     'Missing EXPO_PUBLIC_SUPABASE_URL / EXPO_PUBLIC_SUPABASE_ANON_KEY. ' +
       'Create .env (see .env.example) and rebuild the dev client.',
   );
+} else {
+  // eslint-disable-next-line no-console
+  console.log(
+    '[supabase] client initialized with URL:',
+    url,
+    ' anon-key prefix:',
+    anonKey.slice(0, 12) + '…',
+  );
 }
 
 export const supabase: SupabaseClient = createClient(url ?? '', anonKey ?? '', {
@@ -48,6 +56,11 @@ export interface CallRow {
   transcript: string | null;
   transcript_segments: unknown;
   transcript_provider: string | null;
+  rating: number | null;
+  purchase_confidence: number | null;
+  assigned_contact_name: string | null;
+  assigned_contact_phone: string | null;
+  rated_at: string | null;
   created_at: string;
   updated_at: string;
 }

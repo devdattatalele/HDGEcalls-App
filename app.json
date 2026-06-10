@@ -1,15 +1,25 @@
 {
   "expo": {
-    "name": "Calling",
-    "slug": "calling",
-    "version": "0.1.0",
+    "name": "HDGEcalls",
+    "slug": "hdgecalls",
+    "version": "0.2.0",
     "orientation": "portrait",
-    "scheme": "calling",
+    "scheme": "hdgecalls",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "backgroundColor": "#C8E841",
+      "resizeMode": "contain"
+    },
     "android": {
-      "package": "com.calling.app",
-      "versionCode": 1,
+      "package": "com.hdgelabs.hdgecalls",
+      "versionCode": 2,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#C8E841"
+      },
       "permissions": [
         "READ_CALL_LOG",
         "READ_CONTACTS",
@@ -25,16 +35,16 @@
       ],
       "intentFilters": [
         {
-          "action": "SEND",
-          "category": ["DEFAULT"],
-          "data": [
-            { "mimeType": "audio/*" }
-          ]
-        },
-        {
           "action": "VIEW",
-          "category": ["DEFAULT", "BROWSABLE"],
-          "data": [{ "scheme": "calling" }]
+          "category": [
+            "DEFAULT",
+            "BROWSABLE"
+          ],
+          "data": [
+            {
+              "scheme": "hdgecalls"
+            }
+          ]
         }
       ]
     },
@@ -45,19 +55,43 @@
         "expo-build-properties",
         {
           "android": {
-            "compileSdkVersion": 34,
-            "targetSdkVersion": 34,
+            "compileSdkVersion": 35,
+            "targetSdkVersion": 35,
             "minSdkVersion": 26
           }
         }
       ],
-      "expo-notifications"
+      "expo-notifications",
+      [
+        "expo-share-intent",
+        {
+          "androidIntentFilters": ["*/*"],
+          "androidMainActivityAttributes": {
+            "android:launchMode": "singleTask"
+          },
+          "disableIOS": true
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
     },
+    "updates": {
+      "enabled": true,
+      "url": "https://u.expo.dev/5cd6fe38-fa9f-49bb-81af-d43a93fec2cf",
+      "fallbackToCacheTimeout": 0,
+      "checkAutomatically": "ON_LOAD"
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "extra": {
-      "router": { "origin": false }
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "5cd6fe38-fa9f-49bb-81af-d43a93fec2cf"
+      }
     }
   }
 }

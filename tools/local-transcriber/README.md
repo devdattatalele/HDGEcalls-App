@@ -1,10 +1,26 @@
-# Local Whisper transcriber (Mac, Metal-accelerated)
+# Local transcriber (Mac)
 
-Runs on your MacBook (Apple Silicon). Polls Supabase for `calls` rows where the
-dashboard has flipped `transcription_status = 'pending'`, downloads the audio,
-transcribes it with **whisper.cpp `large-v3-turbo` (q5_0)** on Metal, and
-writes the transcript back. The website (`calls.hdgelabs.com`) is where the
-team manager enqueues calls; this worker is the engine.
+Runs on your MacBook. Polls Supabase for `calls` rows where the dashboard has
+flipped `transcription_status = 'pending'`, downloads the audio, transcribes
+it, and writes the result back. The website (`calls.hdgelabs.com`) is where
+the team manager enqueues calls; this worker is the engine.
+
+**Two backends**, pick one in `.env`:
+
+| `TRANSCRIPTION_BACKEND=` | What | When |
+|---|---|---|
+| `sarvam` | Sarvam Saarika v2.5 batch API (diarized) | customer demo, paid (~$0.006/min) |
+| `whisper` | whisper.cpp `large-v3-turbo` q5_0 on M3 | dev / offline, free |
+
+A sibling folder `../local-transcriber-whisper/` runs the whisper backend with
+its own `.env` (symlinks back to this folder's `src/`, `models/`,
+`node_modules/`) so you can switch between them by `cd`-ing to the other
+folder. Run only one at a time — they share the Supabase queue.
+
+**Gemini cleanup** (optional, free tier): after either backend finishes, the
+worker can run the transcript through `gemini-2.5-flash` to fix mangled tech
+terms ("Pigma" → "Figma") and hallucinated phrases ("Hello Private Hospital").
+Set `LLM_CLEANUP=1` + `GEMINI_API_KEY` to enable.
 
 A small HTTP server on `:7777` exposes `/health` + `/status` so the dashboard
 can show a "Transcriber online" pill. We tunnel that through Cloudflare
@@ -142,12 +158,6 @@ If the worker dies mid-job, any row stuck in `processing` longer than
 `STUCK_PROCESSING_SEC` (default 600 s = 10 min) is bounced back to `pending`
 on the next pass. The dashboard's Retry button does the same thing manually
 (sets `failed` → `pending`).
-
-## Important: don't run both this and the Edge Function
-
-The Edge Function `transcribe-call` and this worker both touch
-`transcription_status`. **Use one or the other.** If you keep this worker, do
-not deploy the Edge Function (or keep `TRANSCRIPTION_PROVIDER=stub`).
 
 ## Security
 

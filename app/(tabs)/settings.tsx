@@ -1,38 +1,88 @@
-import { useEffect, useState } from 'react';
-import {
-  Alert,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  View,
-} from 'react-native';
+import * as Application from 'expo-application';
+import { useRouter } from 'expo-router';
+import { useCallback, useEffect, useState } from 'react';
+import { Alert, Image, Linking, Pressable, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  clearCachedMe,
+  fetchMe,
+  loadCachedMe,
+  type MeResponse,
+} from '../../src/api/client';
+import { Avatar } from '../../src/components/ui/avatar';
+import { Badge } from '../../src/components/ui/badge';
+import { Button } from '../../src/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '../../src/components/ui/card';
+import { Segmented } from '../../src/components/ui/segmented';
+import { Separator } from '../../src/components/ui/separator';
+import { Switch } from '../../src/components/ui/switch';
+import { Muted, Text } from '../../src/components/ui/text';
+import { useAuthGate } from '../../src/context/AuthGate';
+import {
+  fetchMonthlyMinutes,
+  fetchUsage,
+  type MonthlyMinutes,
+  type ProfileUsage,
+} from '../../src/data/profile';
 import { requestAllPermissions, type PermissionState } from '../../src/permissions';
 import { supabase } from '../../src/supabase/client';
+import { useTheme, type ThemeMode } from '../../src/theme/ThemeProvider';
 import {
   registerBackgroundSync,
-  unregisterBackgroundSync,
   runSyncOnce,
+  unregisterBackgroundSync,
 } from '../../src/sync/worker';
 
+const PLAN_LABEL: Record<string, string> = {
+  free: 'Free',
+  starter: 'Starter',
+  pro: 'Pro',
+  business: 'Business',
+};
+
 export default function Settings() {
+  const router = useRouter();
+  const { resetOnboarded } = useAuthGate();
+  const { mode, setMode } = useTheme();
   const [perms, setPerms] = useState<PermissionState | null>(null);
   const [autoSync, setAutoSync] = useState(true);
   const [email, setEmail] = useState<string | null>(null);
+  const [me, setMe] = useState<MeResponse | null>(null);
+  const [usage, setUsage] = useState<ProfileUsage | null>(null);
+  const [minutes, setMinutes] = useState<MonthlyMinutes | null>(null);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.auth.getUser();
-      setEmail(data.user?.email ?? null);
-    })();
+  const reload = useCallback(async () => {
+    const { data } = await supabase.auth.getUser();
+    const user = data.user;
+    setEmail(user?.email ?? null);
+    if (!user) return;
+
+    const cached = await loadCachedMe();
+    if (cached) setMe(cached);
+
+    const [meRes, usageRes, minRes] = await Promise.allSettled([
+      fetchMe(),
+      fetchUsage(user.id),
+      fetchMonthlyMinutes(user.id),
+    ]);
+    if (meRes.status === 'fulfilled') setMe(meRes.value);
+    if (usageRes.status === 'fulfilled') setUsage(usageRes.value);
+    if (minRes.status === 'fulfilled') setMinutes(minRes.value);
   }, []);
 
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
   async function onGrantPermissions() {
-    const state = await requestAllPermissions();
-    setPerms(state);
+    setPerms(await requestAllPermissions());
   }
 
   async function onToggleAutoSync(next: boolean) {
@@ -44,130 +94,288 @@ export default function Settings() {
   async function onSyncNow() {
     setBusy(true);
     const result = await runSyncOnce().catch((e) => {
-      Alert.alert('Sync failed', String(e?.message ?? e));
+      Alert.alert('Sync failed', String((e as Error)?.message ?? e));
       return null;
     });
     setBusy(false);
     if (result) {
       Alert.alert(
         'Sync complete',
-        `Calls upserted: ${result.inserted}\nRecordings uploaded: ${result.paired}\nErrors: ${result.errors}`,
+        `New recordings synced: ${result.inserted}\nErrors: ${result.errors}`,
       );
+      reload();
     }
   }
 
   async function onSignOut() {
     await unregisterBackgroundSync();
+    await clearCachedMe();
     await supabase.auth.signOut();
   }
 
+  async function onReplayTour() {
+    await resetOnboarded();
+    router.replace('/(onboarding)' as never);
+  }
+
+  const company = me?.company ?? null;
+  const userLabel = me?.user?.label?.trim() || email || 'HDGEcalls user';
+  const planLabel = PLAN_LABEL[company?.plan ?? 'free'];
+  const recMin = minutes?.recording_minutes ?? 0;
+  const usageSubtitle =
+    minutes == null
+      ? planLabel
+      : `${planLabel} · ${recMin < 1 ? Math.round(recMin * 60) + 's' : recMin.toFixed(1) + ' min'} recorded this month`;
+
   return (
-    <SafeAreaView style={styles.root} edges={['bottom']}>
-      <ScrollView contentContainerStyle={styles.body}>
-        <Section title="Account">
-          <Row label="Signed in" value={email ?? '—'} />
-          <Pressable style={styles.button} onPress={onSignOut}>
-            <Text style={styles.buttonText}>Sign out</Text>
-          </Pressable>
-        </Section>
+    <SafeAreaView className="flex-1 bg-background" edges={['bottom']}>
+      <ScrollView contentContainerClassName="p-4 gap-4 pb-8">
+        {/* Company header */}
+        <Card>
+          <CardContent className="gap-3 pt-6">
+            <View className="flex-row items-center gap-3">
+              {company?.logo_url ? (
+                <Image
+                  source={{ uri: company.logo_url }}
+                  style={{ width: 48, height: 48, borderRadius: 12 }}
+                />
+              ) : (
+                <View className="h-12 w-12 items-center justify-center rounded-xl bg-brand">
+                  <Text className="text-brand-foreground text-lg font-bold">
+                    {(company?.name ?? 'H').slice(0, 1).toUpperCase()}
+                  </Text>
+                </View>
+              )}
+              <View className="flex-1">
+                <Text className="font-semibold" numberOfLines={1}>
+                  {company?.name ?? 'Your company'}
+                </Text>
+                <Muted className="text-xs">
+                  {company ? 'Signed in to this workspace' : 'Loading workspace…'}
+                </Muted>
+              </View>
+              {company ? (
+                <Badge className="bg-brand">
+                  <Text className="text-brand-foreground text-xs font-semibold">
+                    {planLabel}
+                  </Text>
+                </Badge>
+              ) : null}
+            </View>
 
-        <Section title="Permissions">
-          <Row
-            label="Call log"
-            value={perms ? (perms.callLog ? 'granted' : 'denied') : '—'}
-          />
-          <Row
-            label="Storage / Audio"
-            value={perms ? (perms.mediaAudio ? 'granted' : 'denied') : '—'}
-          />
-          <Row
-            label="Contacts"
-            value={perms ? (perms.contacts ? 'granted' : 'denied') : '—'}
-          />
-          <Row
-            label="Notifications"
-            value={perms ? (perms.notifications ? 'granted' : 'denied') : '—'}
-          />
-          <Pressable style={styles.button} onPress={onGrantPermissions}>
-            <Text style={styles.buttonText}>Request permissions</Text>
-          </Pressable>
-        </Section>
+            <Separator />
 
-        <Section title="Sync">
-          <View style={styles.row}>
-            <Text style={styles.label}>Auto-sync (background)</Text>
-            <Switch value={autoSync} onValueChange={onToggleAutoSync} />
-          </View>
-          <Pressable
-            style={[styles.button, busy && styles.disabled]}
-            onPress={onSyncNow}
-            disabled={busy}
-          >
-            <Text style={styles.buttonText}>{busy ? 'Syncing…' : 'Sync now'}</Text>
-          </Pressable>
-          <Text style={styles.hint}>
-            For background sync to survive Android Doze, also disable battery
-            optimization for this app in system Settings.
-          </Text>
-        </Section>
+            <View className="flex-row items-center gap-3">
+              <Avatar name={userLabel} />
+              <View className="flex-1">
+                <Text className="font-medium" numberOfLines={1}>
+                  {userLabel}
+                </Text>
+                <Muted numberOfLines={1}>{email ?? '—'}</Muted>
+              </View>
+            </View>
+          </CardContent>
+        </Card>
+
+        {/* Plan & usage link */}
+        <Card>
+          <CardContent className="p-0">
+            <LinkRow
+              title="Plan & usage"
+              subtitle={usageSubtitle}
+              onPress={() => router.push('/plan' as never)}
+            />
+          </CardContent>
+        </Card>
+
+        {/* Sync */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Sync</CardTitle>
+            <CardDescription>
+              Background sync every ~15 min. Pull-to-refresh on Calls also syncs.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="gap-3">
+            <Row>
+              <Text>Auto-sync (background)</Text>
+              <Switch checked={autoSync} onCheckedChange={onToggleAutoSync} />
+            </Row>
+            <Button onPress={onSyncNow} loading={busy}>
+              Sync now
+            </Button>
+            <Muted>
+              For background sync to survive Doze, also disable Battery
+              optimization for HDGEcalls in system Settings.
+            </Muted>
+          </CardContent>
+        </Card>
+
+        {/* OEM compatibility — Oppo / Vivo / Xiaomi need extra toggles */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Background reliability</CardTitle>
+            <CardDescription>
+              On Oppo, Vivo, Xiaomi, Realme and similar phones, the OS hides
+              call recordings from non-system apps and aggressively kills
+              background apps. Both toggles below are required for sync to
+              work on those phones.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="gap-3">
+            <View className="gap-1.5">
+              <Text className="font-medium">1. All files access</Text>
+              <Muted className="text-xs">
+                Required to read MIUI / ColorOS / FunTouch call recording
+                folders. Find HDGEcalls in the list and toggle "Allow
+                management of all files".
+              </Muted>
+              <Button
+                variant="outline"
+                onPress={() => {
+                  try {
+                    Linking.sendIntent(
+                      'android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION',
+                    );
+                  } catch {
+                    Linking.openSettings();
+                  }
+                }}
+              >
+                Grant all files access
+              </Button>
+            </View>
+            <View className="gap-1.5">
+              <Text className="font-medium">2. Battery + autostart</Text>
+              <Muted className="text-xs">
+                Battery → "No restrictions" / "Unrestricted". On Oppo/Vivo/Xiaomi
+                also: Autostart → enable.
+              </Muted>
+              <Button variant="outline" onPress={() => Linking.openSettings()}>
+                Open HDGEcalls system settings
+              </Button>
+            </View>
+          </CardContent>
+        </Card>
+
+        {/* Appearance */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Appearance</CardTitle>
+            <CardDescription>Theme follows your selection.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Segmented<ThemeMode>
+              value={mode}
+              onChange={setMode}
+              options={[
+                { value: 'system', label: 'System' },
+                { value: 'light', label: 'Light' },
+                { value: 'dark', label: 'Dark' },
+              ]}
+            />
+          </CardContent>
+        </Card>
+
+        {/* Permissions */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Permissions</CardTitle>
+            <CardDescription>
+              All required for syncing call recordings.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="gap-2">
+            <PermRow label="Call log" granted={perms?.callLog} />
+            <Separator />
+            <PermRow label="Storage / Audio" granted={perms?.mediaAudio} />
+            <Separator />
+            <PermRow label="Contacts" granted={perms?.contacts} />
+            <Separator />
+            <PermRow label="Notifications" granted={perms?.notifications} />
+            <Button variant="outline" onPress={onGrantPermissions} className="mt-2">
+              Request permissions
+            </Button>
+          </CardContent>
+        </Card>
+
+        {/* About */}
+        <Card>
+          <CardHeader>
+            <CardTitle>About HDGEcalls</CardTitle>
+            <CardDescription>
+              Built by HDGElabs · version {Application.nativeApplicationVersion ?? '0.2.0'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-0">
+            <LinkRow title="Replay the app tour" onPress={onReplayTour} />
+            <Separator />
+            <LinkRow
+              title="Support"
+              subtitle="Open HDGElabs in your browser"
+              onPress={() => Linking.openURL('https://calls.hdgelabs.com/support')}
+            />
+          </CardContent>
+        </Card>
+
+        <Button variant="outline" onPress={onSignOut}>
+          Sign out
+        </Button>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Row({ children }: { children: React.ReactNode }) {
   return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      <View style={styles.card}>{children}</View>
-    </View>
+    <View className="flex-row items-center justify-between">{children}</View>
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function LinkRow({
+  title,
+  subtitle,
+  onPress,
+}: {
+  title: string;
+  subtitle?: string;
+  onPress: () => void;
+}) {
   return (
-    <View style={styles.row}>
-      <Text style={styles.label}>{label}</Text>
-      <Text style={styles.value}>{value}</Text>
-    </View>
+    <Pressable
+      onPress={onPress}
+      className="flex-row items-center justify-between px-5 py-4 active:bg-muted"
+    >
+      <View className="flex-1 pr-3">
+        <Text className="font-medium">{title}</Text>
+        {subtitle ? (
+          <Muted numberOfLines={1} className="mt-0.5">
+            {subtitle}
+          </Muted>
+        ) : null}
+      </View>
+      <Text className="text-muted-foreground text-lg">›</Text>
+    </Pressable>
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0d1117' },
-  body: { padding: 16, paddingBottom: 32 },
-  section: { marginBottom: 24 },
-  sectionTitle: {
-    color: '#8b949e',
-    fontSize: 12,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginBottom: 8,
-    marginLeft: 4,
-  },
-  card: {
-    backgroundColor: '#161b22',
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#30363d',
-  },
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  label: { color: '#fff', fontSize: 14 },
-  value: { color: '#8b949e', fontSize: 14 },
-  button: {
-    backgroundColor: '#1f6feb',
-    padding: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  buttonText: { color: '#fff', fontWeight: '600' },
-  disabled: { opacity: 0.5 },
-  hint: { color: '#8b949e', fontSize: 12, marginTop: 8 },
-});
+function PermRow({ label, granted }: { label: string; granted: boolean | undefined }) {
+  let state: string;
+  let cls: string;
+  if (granted === undefined) {
+    state = '—';
+    cls = 'text-muted-foreground';
+  } else if (granted) {
+    state = 'granted';
+    cls = 'text-emerald-600 dark:text-emerald-400';
+  } else {
+    state = 'denied';
+    cls = 'text-red-600 dark:text-red-400';
+  }
+  return (
+    <View className="flex-row items-center justify-between py-1">
+      <Text>{label}</Text>
+      <Text className={cls}>{state}</Text>
+    </View>
+  );
+}

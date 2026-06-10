@@ -1,8 +1,8 @@
 import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
 import { transcribeFile as transcribeWhisper } from './whisper.ts';
-import { transcribeFileIndic, indicProviderLabel } from './indic.ts';
 import { transcribeFileSarvam, sarvamProviderLabel } from './sarvam.ts';
+import { cleanupWithGemini, llmCleanupEnabled } from './llmCleanup.ts';
 import { downloadToTmp, convertToWav16k, cleanupDir } from './audio.ts';
 import { startHealthServer, stats } from './server.ts';
 import path from 'node:path';
@@ -10,19 +10,9 @@ import os from 'node:os';
 import fs from 'node:fs/promises';
 
 const WORKER_ID = process.env.WORKER_ID ?? os.hostname() ?? 'unknown-worker';
-const BACKEND = (process.env.TRANSCRIPTION_BACKEND ?? 'indic').toLowerCase();
+const BACKEND = (process.env.TRANSCRIPTION_BACKEND ?? 'whisper').toLowerCase();
 const transcribeFn =
-  BACKEND === 'sarvam'
-    ? transcribeFileSarvam
-    : BACKEND === 'whisper'
-      ? transcribeWhisper
-      : transcribeFileIndic;
-
-// Layer 3 (whisper.cpp code-switch) only adds value alongside the indic
-// stack — sarvam already preserves English code-switches natively, and
-// running whisper would just slow that backend down for no gain.
-const INCLUDE_WHISPER_LAYER =
-  BACKEND === 'indic' && (process.env.INCLUDE_WHISPER_LAYER ?? '1') !== '0';
+  BACKEND === 'sarvam' ? transcribeFileSarvam : transcribeWhisper;
 
 const SUPABASE_URL = required('SUPABASE_URL');
 const SERVICE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
@@ -34,11 +24,9 @@ const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? '7777');
 const PROVIDER_LABEL =
   BACKEND === 'sarvam'
     ? sarvamProviderLabel()
-    : BACKEND === 'whisper'
-      ? `whisper.cpp:${path
-          .basename(process.env.WHISPER_MODEL ?? 'ggml-small.bin')
-          .replace(/\.bin$/, '')}`
-      : indicProviderLabel();
+    : `whisper.cpp:${path
+        .basename(process.env.WHISPER_MODEL ?? 'ggml-small.bin')
+        .replace(/\.bin$/, '')}`;
 
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -56,18 +44,17 @@ async function main() {
     console.log(
       `[transcriber] sarvam model=${process.env.SARVAM_MODEL ?? 'saarika:v2.5'} lang=${process.env.SARVAM_LANGUAGE ?? 'unknown'} diarize=${process.env.SARVAM_WITH_DIARIZATION ?? '1'}`,
     );
-  } else if (BACKEND === 'whisper') {
+  } else {
     console.log(
       `[transcriber] whisper language=${process.env.WHISPER_LANGUAGE ?? 'auto'} romanize=${process.env.ROMANIZE_HINDI ?? '1'}`,
     );
     console.log(
       `[transcriber] whisper extra args: ${process.env.WHISPER_EXTRA_ARGS ?? '(none)'}`,
     );
-  } else {
-    console.log(
-      `[transcriber] indic asr=${process.env.INDIC_CONFORMER_MODEL ?? 'ai4bharat/indic-conformer-600m-multilingual'} translate=${process.env.INDIC_TRANSLATE_TO_ENGLISH ?? '1'} lang=${process.env.INDIC_LANGUAGE ?? 'mr'} decoder=${process.env.INDIC_DECODER ?? 'ctc'} romanize=${process.env.ROMANIZE_HINDI ?? '1'}`,
-    );
   }
+  console.log(
+    `[transcriber] llm cleanup: ${llmCleanupEnabled() ? `enabled (model=${process.env.GEMINI_MODEL ?? 'gemini-2.5-flash'})` : 'disabled'}`,
+  );
   stats.provider = PROVIDER_LABEL;
   stats.started_at = new Date().toISOString();
 
@@ -94,11 +81,6 @@ async function main() {
   }
 }
 
-/**
- * Upsert our liveness + counters into public.transcriber_status. The
- * dashboard reads this (via the calls.hdgelabs.com FastAPI) to render the
- * "Transcriber online" pill — no inbound network path to the Mac required.
- */
 async function publishHeartbeat(): Promise<void> {
   try {
     await supabase.from('transcriber_status').upsert(
@@ -120,11 +102,6 @@ async function publishHeartbeat(): Promise<void> {
   }
 }
 
-/**
- * Reclaim rows that were claimed ('processing') but never finished —
- * usually because the worker crashed mid-job. Flip them back to 'pending' so
- * the next pass picks them up.
- */
 async function recoverStuck(): Promise<void> {
   const cutoff = new Date(Date.now() - STUCK_SEC * 1000).toISOString();
   const { data, error } = await supabase
@@ -184,9 +161,6 @@ async function processCall(row: {
 }) {
   if (!row.recording_storage_path) return;
 
-  // Claim the row so other workers / passes don't grab it. The matching
-  // .eq('transcription_status','pending') guards against races — if another
-  // worker already grabbed it, our update touches 0 rows and we fall through.
   const { data: claimed, error: claimErr } = await supabase
     .from('calls')
     .update({ transcription_status: 'processing' })
@@ -194,10 +168,7 @@ async function processCall(row: {
     .eq('transcription_status', 'pending')
     .select('id');
   if (claimErr) throw claimErr;
-  if (!claimed || claimed.length === 0) {
-    // Already claimed by someone else; skip silently.
-    return;
-  }
+  if (!claimed || claimed.length === 0) return;
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'calling-'));
   try {
@@ -211,42 +182,23 @@ async function processCall(row: {
       workDir,
       path.basename(row.recording_storage_path),
     );
-    // 16 kHz mono PCM WAV — both backends consume the same canonical form.
     const wav = await convertToWav16k(downloaded, workDir);
 
-    // Run primary backend + (optionally) whisper.cpp in parallel. Whisper
-    // runs in a separate process so the two transcribers don't fight over
-    // the same model — total wall ≈ max(indic, whisper).
-    const [primaryResult, mixedResult] = await Promise.all([
-      transcribeFn(wav),
-      INCLUDE_WHISPER_LAYER
-        ? transcribeWhisper(wav).catch((e) => {
-            console.warn(
-              `[transcriber] whisper layer failed: ${(e as Error)?.message ?? e}`,
-            );
-            return null;
-          })
-        : Promise.resolve(null),
-    ]);
+    const raw = await transcribeFn(wav);
+    const result = await cleanupWithGemini(raw);
 
-    // Indic backend supplies the IndicTrans2 English layer; whisper.cpp
-    // leaves it undefined. Layer 3 (mixed/code-switch) is whisper output.
     const { error: updErr } = await supabase
       .from('calls')
       .update({
-        transcript: primaryResult.text,
-        transcript_segments: primaryResult.segments,
-        transcript_english: primaryResult.textEnglish ?? null,
-        transcript_mixed: mixedResult?.text ?? null,
+        transcript: result.text,
+        transcript_segments: result.segments,
         transcript_provider: PROVIDER_LABEL,
         transcription_status: 'done',
       })
       .eq('id', row.id);
     if (updErr) throw updErr;
 
-    console.log(
-      `[transcriber] done ${row.id} primary=${primaryResult.text.length}ch en=${(primaryResult.textEnglish ?? '').length}ch mixed=${(mixedResult?.text ?? '').length}ch`,
-    );
+    console.log(`[transcriber] done ${row.id} ${result.text.length}ch ${result.segments.length}seg`);
   } finally {
     await cleanupDir(workDir);
   }

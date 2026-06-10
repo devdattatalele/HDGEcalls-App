@@ -7,7 +7,10 @@ export type Pairing = {
   reason: 'filename' | 'timestamp' | 'unmatched';
 };
 
-const TAIL_TOLERANCE_MS = 60_000; // recordings often finalize a bit after the call ends
+// Some OEMs (Xiaomi MIUI, Vivo, Oppo) take a long time to finalise the
+// recording file after the call ends — sometimes 1–3 minutes. We widen the
+// pairing window so those slow finalisations still match.
+const TAIL_TOLERANCE_MS = 5 * 60_000;
 
 function digitsOnly(s: string | null | undefined): string {
   return (s ?? '').replace(/\D/g, '');

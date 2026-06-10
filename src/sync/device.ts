@@ -2,7 +2,7 @@ import * as Application from 'expo-application';
 import { Platform } from 'react-native';
 import { supabase } from '../supabase/client';
 
-const STORAGE_DEVICE_ID_KEY = 'calling.android_id';
+const STORAGE_DEVICE_ID_KEY = 'hdgecalls.android_id';
 
 /** Stable per-install Android identifier. */
 export async function getAndroidId(): Promise<string> {

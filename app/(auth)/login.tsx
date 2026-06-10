@@ -1,122 +1,117 @@
 import { useState } from 'react';
-import {
-  Alert,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { Alert, Image, KeyboardAvoidingView, Platform, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Button } from '../../src/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '../../src/components/ui/card';
+import { Input } from '../../src/components/ui/input';
+import { H1, Muted } from '../../src/components/ui/text';
 import { supabase } from '../../src/supabase/client';
+
+const INVALID_PATTERNS = [
+  /invalid login credentials/i,
+  /invalid credentials/i,
+  /user.*banned/i,
+  /user not found/i,
+];
+
+function friendly(message: string): { title: string; body: string } {
+  if (INVALID_PATTERNS.some((r) => r.test(message))) {
+    return {
+      title: "Can't sign in",
+      body:
+        "Either your password is wrong, or your admin has revoked access. " +
+        'Contact your team admin to verify your credentials.',
+    };
+  }
+  return { title: 'Sign in failed', body: message };
+}
 
 export default function Login() {
   const [email, setEmail] = useState('');
-  const [otp, setOtp] = useState('');
-  const [stage, setStage] = useState<'email' | 'otp'>('email');
+  const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
 
-  async function sendOtp() {
-    if (!email.trim()) return;
+  async function submit() {
+    const e = email.trim().toLowerCase();
+    if (!e || !password) {
+      Alert.alert('Missing', 'Enter your email and password.');
+      return;
+    }
     setBusy(true);
-    const { error } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
-      options: { shouldCreateUser: true },
-    });
-    setBusy(false);
-    if (error) Alert.alert('Sign-in error', error.message);
-    else setStage('otp');
-  }
-
-  async function verifyOtp() {
-    setBusy(true);
-    const { error } = await supabase.auth.verifyOtp({
-      email: email.trim(),
-      token: otp.trim(),
-      type: 'email',
-    });
-    setBusy(false);
-    if (error) Alert.alert('Verification failed', error.message);
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: e,
+        password,
+      });
+      if (error) throw error;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const f = friendly(msg);
+      Alert.alert(f.title, f.body);
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
-    <SafeAreaView style={styles.root}>
+    <SafeAreaView className="flex-1 bg-background">
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.body}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        className="flex-1 justify-center px-6"
       >
-        <Text style={styles.title}>Calling</Text>
-        <Text style={styles.subtitle}>Sign in with a one-time code</Text>
+        <View className="mb-8 items-center">
+          <Image
+            source={require('../../assets/logo.png')}
+            style={{ width: 88, height: 88, borderRadius: 20 }}
+            resizeMode="contain"
+          />
+          <H1 className="mt-4">HDGEcalls</H1>
+          <Muted className="mt-1">by HDGElabs</Muted>
+        </View>
 
-        {stage === 'email' ? (
-          <>
-            <TextInput
+        <Card>
+          <CardHeader>
+            <CardTitle>Sign in</CardTitle>
+            <CardDescription>
+              Use the email and password your team admin gave you.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="gap-3">
+            <Input
+              placeholder="you@yourcompany.com"
               value={email}
               onChangeText={setEmail}
-              placeholder="you@example.com"
-              keyboardType="email-address"
               autoCapitalize="none"
-              style={styles.input}
+              autoCorrect={false}
+              keyboardType="email-address"
+              textContentType="username"
             />
-            <Pressable
-              onPress={sendOtp}
-              disabled={busy}
-              style={[styles.button, busy && styles.disabled]}
-            >
-              <Text style={styles.buttonText}>Send code</Text>
-            </Pressable>
-          </>
-        ) : (
-          <>
-            <Text style={styles.hint}>Code sent to {email}</Text>
-            <TextInput
-              value={otp}
-              onChangeText={setOtp}
-              placeholder="6-digit code"
-              keyboardType="number-pad"
-              style={styles.input}
+            <Input
+              placeholder="Password"
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+              textContentType="password"
             />
-            <Pressable
-              onPress={verifyOtp}
-              disabled={busy}
-              style={[styles.button, busy && styles.disabled]}
-            >
-              <Text style={styles.buttonText}>Verify</Text>
-            </Pressable>
-            <Pressable onPress={() => setStage('email')}>
-              <Text style={styles.link}>Use a different email</Text>
-            </Pressable>
-          </>
-        )}
+            <Button onPress={submit} loading={busy} className="mt-2">
+              Sign in
+            </Button>
+          </CardContent>
+        </Card>
+
+        <View className="mt-8 items-center">
+          <Muted className="text-center text-xs leading-5">
+            HDGEcalls accounts are created by your company admin on the{'\n'}
+            HDGElabs dashboard. There is no in-app signup.
+          </Muted>
+        </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0d1117' },
-  body: { flex: 1, padding: 24, justifyContent: 'center' },
-  title: { color: '#fff', fontSize: 32, fontWeight: '700', marginBottom: 4 },
-  subtitle: { color: '#8b949e', marginBottom: 24 },
-  hint: { color: '#8b949e', marginBottom: 8 },
-  input: {
-    backgroundColor: '#161b22',
-    color: '#fff',
-    padding: 14,
-    borderRadius: 8,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#30363d',
-  },
-  button: {
-    backgroundColor: '#1f6feb',
-    padding: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  disabled: { opacity: 0.5 },
-  buttonText: { color: '#fff', fontWeight: '600' },
-  link: { color: '#1f6feb', marginTop: 16, textAlign: 'center' },
-});
