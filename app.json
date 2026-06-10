@@ -2,7 +2,7 @@
   "expo": {
     "name": "HDGEcalls",
     "slug": "hdgecalls",
-    "version": "0.2.0",
+    "version": "0.3.1",
     "orientation": "portrait",
     "scheme": "hdgecalls",
     "userInterfaceStyle": "automatic",
@@ -15,7 +15,7 @@
     },
     "android": {
       "package": "com.hdgelabs.hdgecalls",
-      "versionCode": 2,
+      "versionCode": 4,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#C8E841"
