@@ -1,8 +1,8 @@
 {
   "expo": {
     "name": "HDGEcalls",
-    "slug": "hdgecalls",
-    "version": "0.3.1",
+    "slug": "calling",
+    "version": "0.3.2",
     "orientation": "portrait",
     "scheme": "hdgecalls",
     "userInterfaceStyle": "automatic",
@@ -15,7 +15,7 @@
     },
     "android": {
       "package": "com.hdgelabs.hdgecalls",
-      "versionCode": 4,
+      "versionCode": 5,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#C8E841"
@@ -80,7 +80,10 @@
       "enabled": true,
       "url": "https://u.expo.dev/5cd6fe38-fa9f-49bb-81af-d43a93fec2cf",
       "fallbackToCacheTimeout": 0,
-      "checkAutomatically": "ON_LOAD"
+      "checkAutomatically": "ON_LOAD",
+      "requestHeaders": {
+        "expo-channel-name": "production"
+      }
     },
     "runtimeVersion": {
       "policy": "appVersion"
