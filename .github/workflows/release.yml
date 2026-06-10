@@ -83,14 +83,21 @@ jobs:
           mv app-release.apk HDGEcalls-${{ steps.tag.outputs.tag }}.apk
           cp HDGEcalls-${{ steps.tag.outputs.tag }}.apk HDGEcalls-latest.apk
 
-      - name: Create / update GitHub Release
+      - name: Create / update Release on the PUBLIC releases-only repo
         uses: softprops/action-gh-release@v2
         with:
+          # Source code stays in the private HDGEcalls-App repo. Built APKs
+          # land in this public repo so anonymous testers can download them
+          # without a login wall. The token below must have write access to
+          # `repository`.
+          repository: devdattatalele/HDGEcalls-releases
+          token: ${{ secrets.RELEASES_REPO_TOKEN }}
           tag_name: ${{ steps.tag.outputs.tag }}
           name: HDGEcalls ${{ steps.tag.outputs.tag }}
-          generate_release_notes: true
+          body: |
+            Automated build from `devdattatalele/HDGEcalls-App@${{ github.sha }}`.
+
+            Install: download `HDGEcalls-latest.apk` and sideload.
           files: |
             android/app/build/outputs/apk/release/HDGEcalls-${{ steps.tag.outputs.tag }}.apk
             android/app/build/outputs/apk/release/HDGEcalls-latest.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

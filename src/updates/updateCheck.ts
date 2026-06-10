@@ -1,10 +1,11 @@
 import * as Application from 'expo-application';
 
 /**
- * Owner/repo of the HDGEcalls app on GitHub. v12 hard-codes this — change it
- * once you've set up the repo. Used to fetch the latest published APK release.
+ * Public releases-only repo. Source lives in the private HDGEcalls-App repo;
+ * built APKs are mirrored here so anonymous downloads work and the in-app
+ * banner can fetch release metadata without a token.
  */
-export const GITHUB_REPO = 'devdattatalele/HDGEcalls-App';
+export const GITHUB_REPO = 'devdattatalele/HDGEcalls-releases';
 
 export interface AvailableRelease {
   tag: string;

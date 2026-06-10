@@ -4,16 +4,31 @@ The app has two update channels. **JS-only changes** ship over-the-air via
 EAS Update (no APK reinstall). **Native or permission changes** require a new
 APK; the in-app banner notifies users when one is published on GitHub.
 
-## Edit me first
+## One-time setup (only the first time)
 
-After creating the GitHub repo:
+### A. Releases-only public repo
 
-1. Open `src/updates/updateCheck.ts` and set `GITHUB_REPO` to the new
-   `<owner>/<repo>`.
-2. (Optional) In `.github/workflows/release.yml`, add Supabase env vars as
-   GitHub Actions secrets: `EXPO_PUBLIC_SUPABASE_URL`,
-   `EXPO_PUBLIC_SUPABASE_ANON_KEY`. Skip if your `.env` is committed (it isn't,
-   per `.gitignore`).
+Source code lives in **private** `devdattatalele/HDGEcalls-App`. Built APKs
+get mirrored to **public** `devdattatalele/HDGEcalls-releases` so anonymous
+testers can download without a GitHub login.
+
+1. Create the public repo at https://github.com/new — name it
+   `HDGEcalls-releases`, visibility **Public**, leave it empty (no README).
+2. Generate a fine-grained PAT at
+   https://github.com/settings/personal-access-tokens/new:
+   - Repository access: only `devdattatalele/HDGEcalls-releases`
+   - Permissions → Contents: **Read and write**
+   - Expiration: as long as you want (1 year is fine)
+   - Copy the token.
+3. In **HDGEcalls-App** (the private source repo) → Settings → Secrets and
+   variables → Actions → New repository secret:
+   - Name: `RELEASES_REPO_TOKEN`
+   - Value: the PAT from step 2
+
+### B. (Optional) Supabase env vars
+
+If you ever stop committing `.env`, add these as Actions secrets too:
+`EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`. Skip until then.
 
 ## A. JS-only updates (most changes)
 
