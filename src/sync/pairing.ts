@@ -1,4 +1,5 @@
 import type { NormalizedCallLogEntry } from './callLog';
+import { last4Digits, logSyncEvent } from './eventLog';
 import type { RecordingFile } from './folderScan';
 
 export type Pairing = {
@@ -38,7 +39,7 @@ export function pairCallsToRecordings(
       call.startedAtMs + call.durationSec * 1000 + TAIL_TOLERANCE_MS;
     const phoneDigits = digitsOnly(call.phoneNumber);
 
-    let chosen: { rec: RecordingFile; reason: Pairing['reason'] } | null = null;
+    let chosen: { rec: RecordingFile; reason: 'filename' | 'timestamp' } | null = null;
 
     // Rule 1: filename match
     if (phoneDigits.length >= 6) {
@@ -76,8 +77,21 @@ export function pairCallsToRecordings(
 
     if (chosen) {
       usedRecordingUris.add(chosen.rec.uri);
+      logSyncEvent({
+        kind: 'pairing_matched',
+        ts: Date.now(),
+        reason: chosen.reason,
+        direction: call.direction,
+        numberSuffix: last4Digits(call.phoneNumber),
+      });
       pairings.push({ call, recording: chosen.rec, reason: chosen.reason });
     } else {
+      logSyncEvent({
+        kind: 'pairing_no_recording_found',
+        ts: Date.now(),
+        direction: call.direction,
+        numberSuffix: last4Digits(call.phoneNumber),
+      });
       pairings.push({ call, recording: null, reason: 'unmatched' });
     }
   }

@@ -1,8 +1,9 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { NormalizedCallLogEntry } from './callLog';
+import { last4Digits, logSyncEvent } from './eventLog';
 
 const STORAGE_KEY = 'hdgecalls.appDials.v1';
-const RETENTION_MS = 24 * 60 * 60 * 1000;
+export const APP_DIAL_RETENTION_MS = 24 * 60 * 60 * 1000;
 const OUTGOING_MATCH_WINDOW_MS = 60_000;
 
 export type AppDial = {
@@ -23,10 +24,12 @@ const MIN_PHONE_DIGITS = 6;
  * "9876543210" (typed in the in-app dialer) matches "+919876543210" (carrier
  * format for the incoming callback). Both sides must have at least 6 digits.
  */
-function sameNumber(a: string, b: string): boolean {
-  if (a.length < MIN_PHONE_DIGITS || b.length < MIN_PHONE_DIGITS) return false;
-  const n = Math.min(PHONE_SUFFIX_LEN, a.length, b.length);
-  return a.slice(-n) === b.slice(-n);
+export function sameNumber(a: string, b: string): boolean {
+  const left = digitsOnly(a);
+  const right = digitsOnly(b);
+  if (left.length < MIN_PHONE_DIGITS || right.length < MIN_PHONE_DIGITS) return false;
+  const n = Math.min(PHONE_SUFFIX_LEN, left.length, right.length);
+  return left.slice(-n) === right.slice(-n);
 }
 
 async function read(): Promise<AppDial[]> {
@@ -55,7 +58,7 @@ async function write(dials: AppDial[]): Promise<void> {
 }
 
 function withinRetention(d: AppDial, now: number): boolean {
-  return now - d.dialedAtMs <= RETENTION_MS;
+  return now - d.dialedAtMs <= APP_DIAL_RETENTION_MS;
 }
 
 type Listener = (dial: AppDial) => void;
@@ -76,6 +79,11 @@ export async function recordAppDial(rawNumber: string): Promise<void> {
   const existing = (await read()).filter((d) => withinRetention(d, now));
   existing.push(dial);
   await write(existing);
+  logSyncEvent({
+    kind: 'app_dial_recorded',
+    ts: Date.now(),
+    numberSuffix: last4Digits(phoneDigits),
+  });
   for (const fn of listeners) {
     try {
       fn(dial);
@@ -101,6 +109,14 @@ export async function markDialMatched(
       : d,
   );
   await write(updated);
+  const matched = dials.find((d) => d.dialedAtMs === dialedAtMs);
+  if (matched) {
+    logSyncEvent({
+      kind: 'app_dial_matched',
+      ts: Date.now(),
+      numberSuffix: last4Digits(matched.phoneDigits),
+    });
+  }
 }
 
 export async function pruneOldAppDials(): Promise<void> {
@@ -142,7 +158,7 @@ export function isAppInitiated(
       }
     } else {
       const delta = call.startedAtMs - d.dialedAtMs;
-      if (delta > 0 && delta <= RETENTION_MS) return d;
+      if (delta > 0 && delta <= APP_DIAL_RETENTION_MS) return d;
     }
   }
   return null;

@@ -14,6 +14,7 @@ import {
 } from './appDials';
 import { readCallLog, type NormalizedCallLogEntry } from './callLog';
 import { ensureDeviceRow, updateDeviceLastSynced } from './device';
+import { last4Digits, logSyncEvent } from './eventLog';
 import { scanRecordingFolders, type RecordingFile } from './folderScan';
 import { pairCallsToRecordings } from './pairing';
 import { uploadRecording } from './uploader';
@@ -125,10 +126,16 @@ let inFlight: Promise<SyncResult> | null = null;
 export function runSyncOnce(): Promise<SyncResult> {
   if (inFlight) return inFlight;
   inFlight = (async (): Promise<SyncResult> => {
-    if (Platform.OS !== 'android') return { inserted: 0, errors: 0 };
+    if (Platform.OS !== 'android') {
+      logSyncEvent({ kind: 'sync_skipped', ts: Date.now(), reason: 'not_android' });
+      return { inserted: 0, errors: 0 };
+    }
 
     const session = await ensureFreshSession();
-    if (!session) return { inserted: 0, errors: 0 };
+    if (!session) {
+      logSyncEvent({ kind: 'sync_skipped', ts: Date.now(), reason: 'no_session' });
+      return { inserted: 0, errors: 0 };
+    }
     const userId = session.user.id;
 
     // Soft cap based on plan limits.
@@ -142,6 +149,7 @@ export function runSyncOnce(): Promise<SyncResult> {
       usage &&
       usage.recordings_used_this_month >= usage.monthly_recording_limit
     ) {
+      logSyncEvent({ kind: 'sync_skipped', ts: Date.now(), reason: 'limit_reached' });
       await maybeNotifyLimit(usage.monthly_recording_limit);
       return { inserted: 0, errors: 0, skipped: -1 };
     }
@@ -159,6 +167,7 @@ export function runSyncOnce(): Promise<SyncResult> {
     const RETRY_WINDOW_MS = 30 * 60 * 1000;
     const savedCursor = cursorRaw ? parseInt(cursorRaw, 10) : Date.now() - 7 * 24 * 3600 * 1000;
     const cursorMs = Math.min(savedCursor, Date.now() - RETRY_WINDOW_MS);
+    logSyncEvent({ kind: 'sync_started', ts: Date.now(), cursorMs });
 
     // allSettled: a revoked call-log permission or a folder-scan glitch
     // shouldn't abort the whole pass.
@@ -178,7 +187,18 @@ export function runSyncOnce(): Promise<SyncResult> {
     const appDials = await loadActiveAppDials();
     const allowedPairings = pairings
       .filter((p) => p.recording)
-      .map((p) => ({ p, dial: isAppInitiated(p.call, appDials) }))
+      .map((p) => {
+        const dial = isAppInitiated(p.call, appDials);
+        if (!dial) {
+          logSyncEvent({
+            kind: 'pairing_rejected_not_app_dialed',
+            ts: Date.now(),
+            direction: p.call.direction,
+            numberSuffix: last4Digits(p.call.phoneNumber),
+          });
+        }
+        return { p, dial };
+      })
       .filter((x): x is { p: typeof x.p; dial: NonNullable<typeof x.dial> } => x.dial !== null);
 
     let inserted = 0;
@@ -207,6 +227,12 @@ export function runSyncOnce(): Promise<SyncResult> {
 
         const callId = Crypto.randomUUID();
 
+        logSyncEvent({
+          kind: 'upload_started',
+          ts: Date.now(),
+          direction: p.call.direction,
+          numberSuffix: last4Digits(p.call.phoneNumber),
+        });
         const { path, mime } = await uploadRecording({
           userId,
           callId,
@@ -240,10 +266,24 @@ export function runSyncOnce(): Promise<SyncResult> {
           durationSec: p.call.durationSec,
           direction: p.call.direction,
         });
+        logSyncEvent({
+          kind: 'upload_success',
+          ts: Date.now(),
+          direction: p.call.direction,
+          numberSuffix: last4Digits(p.call.phoneNumber),
+          durationSec: p.call.durationSec,
+        });
         inserted++;
         budget--;
       } catch (e) {
         errors++;
+        logSyncEvent({
+          kind: 'upload_failed',
+          ts: Date.now(),
+          direction: p.call.direction,
+          numberSuffix: last4Digits(p.call.phoneNumber),
+          errorName: e instanceof Error ? e.name : 'Error',
+        });
         // eslint-disable-next-line no-console
         console.warn('[sync] failed for call', p.call.callLogId, e);
       }
@@ -257,6 +297,7 @@ export function runSyncOnce(): Promise<SyncResult> {
     }
     await updateDeviceLastSynced(deviceId);
     await pruneOldAppDials();
+    logSyncEvent({ kind: 'sync_finished', ts: Date.now(), inserted, errors });
 
     return { inserted, errors };
   })().finally(() => {

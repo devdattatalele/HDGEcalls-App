@@ -1,4 +1,5 @@
 import { PermissionsAndroid, Platform } from 'react-native';
+import { logSyncEvent } from './eventLog';
 
 // react-native-call-log is Android-only and ships native code; require it
 // lazily so the bundle still runs in Expo Go and web preview, where the
@@ -77,7 +78,14 @@ export async function readCallLog(
 ): Promise<NormalizedCallLogEntry[]> {
   if (Platform.OS !== 'android' || !CallLogs) return [];
   const ok = await ensureCallLogPermission();
-  if (!ok) return [];
+  if (!ok) {
+    logSyncEvent({
+      kind: 'permission_denied',
+      ts: Date.now(),
+      permission: 'call_log',
+    });
+    return [];
+  }
 
   let rows: RawCallLogEntry[] = [];
   try {
@@ -90,7 +98,7 @@ export async function readCallLog(
     return [];
   }
 
-  return rows
+  const normalized = rows
     .map((r) => {
       const ts =
         typeof r.timestamp === 'string' ? parseInt(r.timestamp, 10) : r.timestamp ?? 0;
@@ -108,4 +116,13 @@ export async function readCallLog(
     })
     .filter((e) => e.startedAtMs > sinceMs)
     .sort((a, b) => b.startedAtMs - a.startedAtMs);
+  // One summary event per scan — per-row logging would burn the 50-event
+  // ring buffer on a phone with hundreds of recent calls.
+  logSyncEvent({
+    kind: 'call_log_scanned',
+    ts: Date.now(),
+    count: normalized.length,
+    newestTs: normalized[0]?.startedAtMs ?? null,
+  });
+  return normalized;
 }

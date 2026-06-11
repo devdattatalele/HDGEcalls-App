@@ -10,6 +10,7 @@
     "build:dev": "eas build --profile development --platform android",
     "build:preview": "eas build --profile preview --platform android",
     "typecheck": "tsc --noEmit",
+    "test": "jest",
     "ios": "expo run:ios"
   },
   "dependencies": {
@@ -25,6 +26,7 @@
     "expo-av": "~16.0.8",
     "expo-background-fetch": "~14.0.9",
     "expo-build-properties": "~1.0.10",
+    "expo-clipboard": "~8.0.8",
     "expo-constants": "~18.0.13",
     "expo-contacts": "~15.0.11",
     "expo-crypto": "~15.0.9",
@@ -54,7 +56,10 @@
   },
   "devDependencies": {
     "@opentelemetry/api": "^1.9.1",
+    "@types/jest": "^29.5.12",
     "@types/react": "~19.1.0",
+    "jest": "^29.7.0",
+    "jest-expo": "^54.0.13",
     "tailwindcss": "^3.4.19",
     "typescript": "~5.9.0"
   }

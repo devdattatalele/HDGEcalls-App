@@ -1,5 +1,6 @@
 import { Directory, File } from 'expo-file-system';
 import { Platform } from 'react-native';
+import { logSyncEvent } from './eventLog';
 
 /**
  * Folders known to contain native call recordings across major Android OEMs.
@@ -78,6 +79,12 @@ function isAudioFile(name: string): boolean {
   return AUDIO_EXTS.some((ext) => lower.endsWith(ext));
 }
 
+function extForName(name: string): string {
+  const lower = name.toLowerCase();
+  const dot = lower.lastIndexOf('.');
+  return dot >= 0 ? lower.slice(dot) : '';
+}
+
 /**
  * Walk the given folders one level deep and return audio files modified after
  * `sinceMs`. Tiny files (likely still being written) are skipped so the next
@@ -93,13 +100,33 @@ export async function scanRecordingFolders(
 
   // De-dupe paths because several OEMs share the same fallback dir.
   const uniqueFolders = Array.from(new Set(folders));
+  logSyncEvent({
+    kind: 'scan_started',
+    ts: Date.now(),
+    folderCount: uniqueFolders.length,
+    sinceMs,
+  });
 
   for (const folderUri of uniqueFolders) {
     let dir: Directory;
     try {
       dir = new Directory(folderUri);
-      if (!dir.exists) continue;
+      if (!dir.exists) {
+        logSyncEvent({
+          kind: 'scan_folder_inaccessible',
+          ts: Date.now(),
+          folderUri,
+          reason: 'missing',
+        });
+        continue;
+      }
     } catch {
+      logSyncEvent({
+        kind: 'scan_folder_inaccessible',
+        ts: Date.now(),
+        folderUri,
+        reason: 'open_failed',
+      });
       continue;
     }
 
@@ -107,6 +134,12 @@ export async function scanRecordingFolders(
     try {
       entries = dir.list();
     } catch {
+      logSyncEvent({
+        kind: 'scan_folder_inaccessible',
+        ts: Date.now(),
+        folderUri,
+        reason: 'list_failed',
+      });
       continue;
     }
 
@@ -120,6 +153,14 @@ export async function scanRecordingFolders(
       if (sizeBytes < MIN_AUDIO_BYTES) continue;
       if (seen.has(entry.uri)) continue;
       seen.add(entry.uri);
+      logSyncEvent({
+        kind: 'recording_found',
+        ts: Date.now(),
+        folderUri,
+        ext: extForName(name),
+        sizeBytes,
+        mtimeMs,
+      });
       results.push({
         uri: entry.uri,
         filename: name,

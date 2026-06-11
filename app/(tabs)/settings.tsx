@@ -185,6 +185,12 @@ export default function Settings() {
               subtitle={usageSubtitle}
               onPress={() => router.push('/plan' as never)}
             />
+            <Separator />
+            <LinkRow
+              title="Sync Health"
+              subtitle="Permissions, counters, and support log"
+              onPress={() => router.push('/sync-health' as never)}
+            />
           </CardContent>
         </Card>
 
